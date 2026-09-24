@@ -21,8 +21,8 @@ ground truth.
 
 ## Definitions
 
-- **Repository task**: a task that reads or modifies at least one file or
-  directory in the workspace.
+- **Repository task**: a task whose answer or execution depends on workspace
+  files, directories, repository history, repository state, or changes to them.
 - **Source-inspection call**: a tool call that reads workspace content or
   history. `read`, `grep`, `find`, and `ls` are source-inspection calls. A
   `bash` command is a source-inspection call when it reads content or history,
@@ -49,6 +49,9 @@ ground truth.
 - **Scope**: one query per path scope. Use `path_prefix` for a directory. Use
   `meta get` with `path` and `tag` only when one exact `(path, tag)` pair is
   already known.
+- **Unknown scope**: if the relevant file or directory is not yet known, query
+  the workspace with `path_prefix: "."`. Narrow the scope with later queries
+  once paths are discovered.
 - **Hard limit**: one `meta query` call MUST precede the first source-inspection
   call. Later queries are unlimited.
 - **Exceptions**: a task that involves no file or directory is exempt.
@@ -103,13 +106,13 @@ when exact implementation details matter.
 - **Actor**: the agent.
 - **Trigger**: the agent is about to finish a repository task.
 - **Precondition**: the task read or modified at least one file.
-- **Requirement**: the agent MUST record each durable fact that the task
-  established and that the store does not already contain. The agent MUST NOT
-  record syntax, current values, temporary task state, or guesses.
+- **Requirement**: the agent MUST record each material durable fact that the
+  task established and that the store does not already contain. The agent MUST
+  NOT record syntax, current values, temporary task state, or guesses.
 - **Scope**: one note per `(subject path, tag)` pair.
 - **Failure behavior**: if `meta set` fails, report the failure and continue.
-- **Acceptance test**: the transcript shows a `meta set` call for each durable
-  fact the task established, or the final report states that none was
+- **Acceptance test**: the transcript shows a `meta set` call for each material
+  durable fact the task established, or the final report states that none was
   established.
 
 Prefer a short note when the task learned about:
@@ -139,6 +142,9 @@ Do not record:
   valid notes unchanged.
 - **Scope**: files the task modified, plus files whose notes the task's queries
   surfaced.
+- **Truncation**: if a query that covers modified files is limited before all
+  relevant records are known, issue narrower follow-up queries before
+  reconciliation.
 - **Failure behavior**: if reconciliation fails, report the affected paths.
 - **Acceptance test**: no note surfaced by the task's queries remains `STALE`
   for a file the task modified, unless the final report names it.
@@ -178,6 +184,8 @@ The tag MUST be one of the declared tags. Use one tag per note:
   that tag is no longer declared.
 - If the store reaches quota, new records may fail with `QUOTA_EXCEEDED`;
   replacing existing records and deleting records remain available.
+- `meta query` returns at most 20 records by default; `limit` may be raised to
+  at most 50. Use narrower follow-up queries when the matching set is larger.
 - Query results shown to the model are bounded to 51200 UTF-8 bytes and
   2000 lines. Use `meta get` for a complete record when needed.
 
