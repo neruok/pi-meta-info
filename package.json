@@ -1,6 +1,6 @@
 {
   "name": "@neruok/pi-meta-info",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Cross-session file memory: one meta tool over a file-hash sidecar store.",
   "license": "MIT",
