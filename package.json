@@ -18,11 +18,15 @@
   "pi": {
     "extensions": [
       "./meta.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "files": [
     "meta.ts",
     "lib",
+    "skills",
     "README.md",
     "LICENSE"
   ],

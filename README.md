@@ -32,6 +32,7 @@ Or add it to a Pi profile's `packages` list as `npm:@neruok/pi-meta-info`.
 | `lib/meta/index.ts` | The pure core: config, index, path containment, the five actions, rendering. |
 | `scripts/check-meta.mjs` | Pure-core acceptance checks, without Pi and without a model. |
 | `scripts/check-meta-extension.mjs` | Tool registration and boundary checks against the installed Pi runtime. |
+| `skills/meta-memory/SKILL.md` | Skill: when and how to record and reuse file memory with the `meta` tool. |
 | `.github/workflows/verify.yml` | CI: type check and both acceptance suites. |
 
 ## Verify
