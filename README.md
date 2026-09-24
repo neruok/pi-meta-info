@@ -34,6 +34,7 @@ development, you can instead run `npm install` and add the package to a profile
 | `lib/meta/index.ts` | The pure core: config, index, path containment, the five actions, rendering. |
 | `scripts/check-meta.mjs` | Pure-core acceptance checks, without Pi and without a model. |
 | `scripts/check-meta-extension.mjs` | Tool registration and boundary checks against the installed Pi runtime. |
+| `scripts/diagnose-meta-adherence.mjs` | Dev diagnostic (not shipped, not part of `verify`): classifies Pi session transcripts by meta-memory skill load and `meta` call timing. |
 | `skills/meta-memory/SKILL.md` | Skill: when and how to record and reuse file memory with the `meta` tool. |
 | `.github/workflows/verify.yml` | CI: type check and both acceptance suites. |
 
