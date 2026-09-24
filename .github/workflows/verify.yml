@@ -1,0 +1,23 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Install the Pi runtime the extension checks resolve
+        run: npm install --global @earendil-works/pi-coding-agent@0.87.1
+      - run: npm run verify

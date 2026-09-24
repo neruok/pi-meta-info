@@ -1,0 +1,57 @@
+{
+  "name": "@neruok/pi-meta-info",
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Cross-session file memory: one meta tool over a file-hash sidecar store.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neruok/pi-meta-info.git"
+  },
+  "homepage": "https://github.com/neruok/pi-meta-info#readme",
+  "bugs": {
+    "url": "https://github.com/neruok/pi-meta-info/issues"
+  },
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./meta.ts"
+    ]
+  },
+  "files": [
+    "meta.ts",
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "node scripts/check-meta.mjs && node scripts/check-meta-extension.mjs",
+    "typecheck": "tsc --noEmit --allowImportingTsExtensions --module nodenext --moduleResolution nodenext --target esnext --strict --skipLibCheck lib/meta/*.ts",
+    "verify": "npm run typecheck && npm run check",
+    "prepublishOnly": "npm run verify"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.6",
+    "typescript": "^5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

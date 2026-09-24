@@ -1,0 +1,7 @@
+# Installed dependencies. Keep the manifest and lockfile.
+node_modules/
+
+# TypeScript and editor scratch.
+*.tsbuildinfo
+*.log
+.DS_Store
