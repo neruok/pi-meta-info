@@ -68,7 +68,7 @@ export default function meta(pi: ExtensionAPI): void {
       verify: Type.Optional(Type.Boolean({ description: "Hash subjects during query; default true" })),
       limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50, description: "Query limit; default 20" })),
     }),
-    execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const sessionId = ctx.sessionManager.getSessionId();
       const workspace = openMeta(ctx.cwd, {
         sessionId,

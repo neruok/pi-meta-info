@@ -19,10 +19,12 @@ the `new-coder` Pi profile.
 ## Install
 
 ```sh
-npm install @neruok/pi-meta-info
+pi install npm:@neruok/pi-meta-info
 ```
 
-Or add it to a Pi profile's `packages` list as `npm:@neruok/pi-meta-info`.
+This installs the package and activates the extension and its skill in Pi. For
+development, you can instead run `npm install` and add the package to a profile
+`packages` list as `npm:@neruok/pi-meta-info`.
 
 ## Layout
 
