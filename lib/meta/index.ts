@@ -18,6 +18,7 @@
 import { createHash } from "node:crypto";
 import {
   closeSync,
+  constants,
   existsSync,
   fsyncSync,
   lstatSync,
@@ -445,8 +446,78 @@ const EMPTY_RESULT_COUNTS = {
   content_truncated: false,
 } as const;
 
+const STORE_PARTS = [".pi", "meta"] as const;
+
+/**
+ * Resolve the store directory under the canonical workspace, rejecting any
+ * symlink in the store path (REQ-SCOPE-5). The store is never redirected: an
+ * existing `.pi` or `.pi/meta` that is a symlink is rejected. Missing trailing
+ * components resolve under the canonical workspace and are created later.
+ */
 function storeDir(root: string): string {
-  return join(root, ".pi", "meta");
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch (error) {
+    throw new MetaFailure("PATH_UNRESOLVED", `cannot resolve workspace: ${messageOf(error)}`, "path");
+  }
+  let current = rootReal;
+  for (let index = 0; index < STORE_PARTS.length; index += 1) {
+    const part = STORE_PARTS[index];
+    const next = join(current, part);
+    let stat;
+    try {
+      stat = lstatSync(next);
+    } catch (error) {
+      const code = codeOf(error);
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return join(current, ...STORE_PARTS.slice(index));
+      }
+      throw new MetaFailure("PATH_UNRESOLVED", `cannot inspect store path: ${messageOf(error)}`, "path");
+    }
+    if (stat.isSymbolicLink()) {
+      throw new MetaFailure("PATH_OUTSIDE_WORKSPACE", `store path must not be a symlink: ${part}`, "path");
+    }
+    if (!stat.isDirectory()) {
+      throw new MetaFailure("PATH_UNRESOLVED", `store path component is not a directory: ${part}`, "path");
+    }
+    current = next;
+  }
+  return current;
+}
+
+/** Reject an existing store file that is a symlink (REQ-SCOPE-5). */
+function assertStoreFileSafe(path: string): void {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch (error) {
+    const code = codeOf(error);
+    if (code === "ENOENT" || code === "ENOTDIR") return;
+    throw new MetaFailure("PATH_UNRESOLVED", `cannot inspect store file: ${messageOf(error)}`, "path");
+  }
+  if (stat.isSymbolicLink()) {
+    throw new MetaFailure("PATH_OUTSIDE_WORKSPACE", "store file must not be a symlink", "path");
+  }
+}
+
+/** Read a store file without following a final symlink (REQ-SCOPE-5). */
+function readStoreText(path: string): string {
+  assertStoreFileSafe(path);
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (codeOf(error) === "ELOOP") {
+      throw new MetaFailure("PATH_OUTSIDE_WORKSPACE", "store file must not be a symlink", "path");
+    }
+    throw error;
+  }
+  try {
+    return readFileSync(fd, "utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function indexPath(root: string): string {
@@ -464,7 +535,21 @@ function usagePath(root: string): string {
 /** Best-effort append of one usage row (REQ-MEAS-2). Throws on I/O failure. */
 function appendUsageRow(root: string, row: UsageRow): void {
   ensureStoreDir(root);
-  const fd = openSync(usagePath(root), "a", 0o600);
+  const path = usagePath(root);
+  assertStoreFileSafe(path);
+  let fd: number;
+  try {
+    fd = openSync(
+      path,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+      0o600,
+    );
+  } catch (error) {
+    if (codeOf(error) === "ELOOP") {
+      throw new MetaFailure("PATH_OUTSIDE_WORKSPACE", "store file must not be a symlink", "path");
+    }
+    throw error;
+  }
   try {
     writeSync(fd, `${JSON.stringify(row)}\n`);
   } finally {
@@ -564,10 +649,12 @@ function validateIndex(value: unknown): MetaRecord[] {
 }
 
 function loadIndex(root: string): MetaRecord[] {
+  const path = indexPath(root);
   let text: string;
   try {
-    text = readFileSync(indexPath(root), "utf8");
+    text = readStoreText(path);
   } catch (error) {
+    if (error instanceof MetaFailure) throw error;
     if (codeOf(error) === "ENOENT") return [];
     throw new IndexReadError(`cannot read index: ${messageOf(error)}`);
   }
@@ -602,10 +689,12 @@ function validateConfigValue(value: unknown): Record<string, string> {
 
 function loadConfig(workspace: MetaWorkspace): Record<string, string> {
   if (workspace.options.config !== undefined) return validateConfigValue(workspace.options.config);
+  const path = configPath(workspace.root);
   let text: string;
   try {
-    text = readFileSync(configPath(workspace.root), "utf8");
+    text = readStoreText(path);
   } catch (error) {
+    if (error instanceof MetaFailure) throw error;
     if (codeOf(error) === "ENOENT") return validateConfigValue({ schema_version: 1, tags: BUILT_IN_TAGS });
     throw new MetaFailure("CONFIG_INVALID", `cannot read config: ${messageOf(error)}`);
   }
@@ -628,13 +717,19 @@ function ensureStoreDir(root: string): void {
   const dir = storeDir(root);
   mkdirSync(dir, { recursive: true });
   const ignore = join(dir, ".gitignore");
-  if (!existsSync(ignore)) {
-    const fd = openSync(ignore, "wx");
+  try {
+    const fd = openSync(
+      ignore,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
     try {
       writeSync(fd, "*\n!.gitignore\n");
     } finally {
       closeSync(fd);
     }
+  } catch (error) {
+    if (codeOf(error) !== "EEXIST") throw error;
   }
 }
 
@@ -647,7 +742,11 @@ function commitIndex(workspace: MetaWorkspace, records: readonly MetaRecord[], w
   const rename = workspace.options.renameFile ?? renameSync;
   let openDescriptor: number | null = null;
   try {
-    openDescriptor = openSync(absolute, "wx", 0o600);
+    openDescriptor = openSync(
+      absolute,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
     writeSync(openDescriptor, text);
     fsyncSync(openDescriptor);
     closeSync(openDescriptor);
@@ -684,6 +783,7 @@ function withLock<T>(workspace: MetaWorkspace, fn: (warnings: MetaWarning[]) => 
   const root = workspace.root;
   ensureStoreDir(root);
   const lockPath = join(storeDir(root), "index.lock");
+  assertStoreFileSafe(lockPath);
   const token = `${process.pid}-${Date.now()}-${(tempCounter += 1)}`;
   const monotonicNow = workspace.options.monotonicNow ?? (() => performance.now());
   const sleepFor = workspace.options.sleep ?? sleep;
@@ -694,7 +794,11 @@ function withLock<T>(workspace: MetaWorkspace, fn: (warnings: MetaWarning[]) => 
     }
     checkpoint(workspace, "lock");
     try {
-      const fd = openSync(lockPath, "wx", 0o600);
+      const fd = openSync(
+        lockPath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
       try {
         writeSync(fd, token);
       } finally {
@@ -715,7 +819,7 @@ function withLock<T>(workspace: MetaWorkspace, fn: (warnings: MetaWarning[]) => 
   } finally {
     try {
       workspace.options.onLifecycle?.("lock-release");
-      if (readFileSync(lockPath, "utf8") === token) unlinkSync(lockPath);
+      if (readStoreText(lockPath) === token) unlinkSync(lockPath);
     } catch (error) {
       warnings.push({ code: "LOCK_RELEASE_FAILED", message: `cannot release lock: ${messageOf(error)}` });
     }

@@ -2105,6 +2105,96 @@ await check("AC-34", "a simulated derived-ID collision for a different pair is r
   assert.equal(records[0].id, existingId);
 });
 
+/** A workspace and a sibling directory outside it, for store-path cases. */
+function storeScenario(name) {
+  const base = join(scratch, name);
+  const root = join(base, "ws");
+  const outside = join(base, "outside");
+  mkdirSync(root, { recursive: true });
+  mkdirSync(outside, { recursive: true });
+  return { base, root, outside };
+}
+
+/** Options that make a blocked lock time out immediately in a test. */
+function fastLockOptions() {
+  let elapsed = 0;
+  return { monotonicNow: () => (elapsed += 1000), sleep: () => {} };
+}
+
+await check("AC-43", "the store path and its files reject symlinks without outside mutation", () => {
+  {
+    const { root, outside } = storeScenario("ac43-dotpi");
+    symlinkSync(outside, join(root, ".pi"), "dir");
+    const ws = core.openMeta(root, { now: () => new Date(clockMs++), sessionId: "sess-A" });
+    const get = ws.execute("get", { path: "a.txt" });
+    assert.equal(get.error?.code, "PATH_OUTSIDE_WORKSPACE", "a .pi symlink is rejected on read");
+    const warnings = ws.observeSession();
+    assert.ok(warnings.some((warning) => warning.code === "LOG_WRITE_FAILED"), "an unsafe log location warns");
+    assert.ok(!existsSync(join(outside, "meta")), "no store is created outside the workspace");
+  }
+  {
+    const { root, outside } = storeScenario("ac43-metalink");
+    mkdirSync(join(root, ".pi"));
+    symlinkSync(outside, join(root, ".pi", "meta"), "dir");
+    const ws = core.openMeta(root, { now: () => new Date(clockMs++), sessionId: "sess-A" });
+    const get = ws.execute("get", { path: "a.txt" });
+    assert.equal(get.error?.code, "PATH_OUTSIDE_WORKSPACE", "a .pi/meta symlink is rejected on read");
+    assert.ok(!existsSync(join(outside, "usage.jsonl")), "no usage log is created outside");
+  }
+  for (const name of ["index.json", "config.json", "usage.jsonl", "index.lock"]) {
+    const { root, outside } = storeScenario("ac43-file-" + name);
+    mkdirSync(join(root, ".pi", "meta"), { recursive: true });
+    writeFileSync(join(root, "a.txt"), "subject bytes");
+    const victim = join(outside, "victim");
+    writeFileSync(victim, "ORIGINAL");
+    symlinkSync(victim, join(root, ".pi", "meta", name));
+    const ws = core.openMeta(root, {
+      now: () => new Date(clockMs++),
+      sessionId: "sess-A",
+      ...fastLockOptions(),
+    });
+    const result = ws.execute("set", { path: "a.txt", tag: "summary", note: "x" });
+    if (name === "usage.jsonl") {
+      assert.equal(result.error, null, "the call itself still succeeds");
+      assert.ok(
+        result.warnings.some((warning) => warning.code === "LOG_WRITE_FAILED"),
+        "the unsafe log location warns instead of appending",
+      );
+    } else {
+      assert.equal(result.error?.code, "PATH_OUTSIDE_WORKSPACE", name + " is rejected");
+    }
+    assert.equal(readFileSync(victim, "utf8"), "ORIGINAL", name + " target is unmodified");
+  }
+});
+
+await check("AC-44", "initialization tolerates an existing git-ignore and concurrent first initialization", async () => {
+  {
+    const { root, outside } = storeScenario("ac44-ignore");
+    mkdirSync(join(root, ".pi", "meta"), { recursive: true });
+    writeFileSync(join(root, "a.txt"), "bytes");
+    const missing = join(outside, "missing-ignore");
+    symlinkSync(missing, join(root, ".pi", "meta", ".gitignore"));
+    const ws = core.openMeta(root, { now: () => new Date(clockMs++), sessionId: "sess-A" });
+    const set = ws.execute("set", { path: "a.txt", tag: "summary", note: "ok" });
+    assert.equal(set.error, null, "an existing git-ignore does not fail initialization: " + JSON.stringify(set.error));
+    assert.ok(!existsSync(missing), "the git-ignore symlink target is not created");
+    assert.equal(JSON.parse(readFileSync(indexPath(root), "utf8")).records.length, 1, "the store is valid");
+  }
+  {
+    const root = join(scratch, "ac44-concurrent");
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "a.txt"), "bytes");
+    writeFileSync(join(root, "b.txt"), "bytes");
+    const [first, second] = await Promise.all([
+      runMetaChild([root, "a.txt", "summary", "a", "sess-A"]),
+      runMetaChild([root, "b.txt", "summary", "b", "sess-B"]),
+    ]);
+    assert.equal(first.error, null, "the first concurrent initializer succeeds: " + JSON.stringify(first));
+    assert.equal(second.error, null, "the second concurrent initializer succeeds: " + JSON.stringify(second));
+    assert.equal(JSON.parse(readFileSync(indexPath(root), "utf8")).records.length, 2, "both records persist");
+  }
+});
+
 const failed = results.filter((result) => !result.ok);
 for (const result of results) {
   const marker = result.ok ? "PASS" : "FAIL";
