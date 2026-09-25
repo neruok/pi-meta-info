@@ -224,6 +224,109 @@ try {
     assert.equal(usageRowCount(), afterSet, "the notice logs nothing");
   });
 
+  // --- Edit/write memory-update notice (AC-NOTICE-12..16) -----------------
+  //
+  // Changed behavior: a successful `edit` or `write` of an exact recorded
+  // subject has one bounded `<file-memory-update>` block appended. The block
+  // lists tags and post-mutation staleness and asks the caller to update a
+  // record only when reusable knowledge changed. The extension never writes.
+  const editEvent = (path, content = [{ type: "text", text: `Successfully replaced 1 block(s) in ${path}.` }], toolName = "edit", isError = false) => ({
+    type: "tool_result",
+    toolCallId: "edit-1",
+    toolName,
+    input: { path },
+    content,
+    isError,
+    details: undefined,
+  });
+
+  await check("AC-NOTICE-12", "an edit result gets one appended update notice and preserves the original content", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "update12.txt"), "before");
+    await invoke({ action: "set", path: "update12.txt", tag: "summary", note: "body U12" });
+    const original = [{ type: "text", text: "Successfully replaced 1 block(s) in update12.txt." }];
+    writeFileSync(join(workspaceRoot, "update12.txt"), "after");
+    const result = await invokeEvent("tool_result", editEvent("update12.txt", original), ctx);
+    assert.ok(result, "the edit result is annotated");
+    assert.equal(result.content.length, original.length + 1, "exactly one block is appended");
+    for (let i = 0; i < original.length; i += 1) assert.deepEqual(result.content[i], original[i], `original part ${i} is unchanged`);
+    const appended = result.content[result.content.length - 1];
+    assert.equal(appended.type, "text", "the appended part is text");
+    assert.match(appended.text, /^<file-memory-update>\n/, "the block opens the element");
+    assert.match(appended.text, /\n<\/file-memory-update>$/, "the block closes the element");
+    assert.match(appended.text, /update12\.txt/, "the subject is named");
+    assert.match(appended.text, /summary/, "the tag is listed");
+    assert.match(appended.text, /\[STALE\]/, "post-mutation staleness is listed");
+    assert.ok(!appended.text.includes("body U12"), "no note body is carried");
+    assert.match(appended.text, /meta set/, "an update call is suggested");
+    assert.equal(result.isError, undefined, "no error flag is set");
+    assert.equal(result.details, undefined, "no details are set");
+    assert.ok(Buffer.byteLength(appended.text, "utf8") <= 4096, "the block is bounded");
+  });
+
+  await check("AC-NOTICE-13", "recorded writes are annotated; other mutations pass through", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "update13.txt"), "before");
+    await invoke({ action: "set", path: "update13.txt", tag: "summary", note: "body U13" });
+    writeFileSync(join(workspaceRoot, "update13.txt"), "after");
+    const writeResult = await invokeEvent("tool_result", editEvent("update13.txt", [{ type: "text", text: "Successfully wrote to update13.txt" }], "write"), ctx);
+    assert.ok(writeResult, "a recorded write is annotated");
+    assert.match(writeResult.content[writeResult.content.length - 1].text, /<file-memory-update>/, "the write notice uses the update element");
+    assert.equal(await invokeEvent("tool_result", editEvent("unrecorded-u13.txt"), ctx), undefined, "an unrecorded edit passes through");
+    const mixed = [{ type: "text", text: "ok" }, { type: "image", data: "AAAA", mimeType: "image/png" }];
+    assert.equal(await invokeEvent("tool_result", editEvent("update13.txt", mixed), ctx), undefined, "a non-text result passes through");
+    assert.equal(await invokeEvent("tool_result", editEvent("update13.txt", [{ type: "text", text: "err" }], "edit", true), ctx), undefined, "an error result passes through");
+    assert.equal(await invokeEvent("tool_result", editEvent("../outside.txt"), ctx), undefined, "an outside edit path passes through");
+  });
+
+  await check("AC-NOTICE-14", "the update notice writes nothing automatically", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "update14.txt"), "before");
+    await invoke({ action: "set", path: "update14.txt", tag: "summary", note: "body U14" });
+    const indexBefore = readFileSync(join(workspaceRoot, ".pi", "meta", "index.json"), "utf8");
+    const rowsBefore = usageRowCount();
+    writeFileSync(join(workspaceRoot, "update14.txt"), "after");
+    await invokeEvent("tool_result", editEvent("update14.txt"), ctx);
+    assert.equal(readFileSync(join(workspaceRoot, ".pi", "meta", "index.json"), "utf8"), indexBefore, "the index is unchanged");
+    assert.equal(usageRowCount(), rowsBefore, "no usage row is appended");
+  });
+
+  await check("AC-NOTICE-15", "the update notice is once per subject per run and resets on agent_start and session_compact", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "update15.txt"), "before");
+    await invoke({ action: "set", path: "update15.txt", tag: "summary", note: "body U15" });
+    writeFileSync(join(workspaceRoot, "update15.txt"), "after");
+    assert.ok(await invokeEvent("tool_result", editEvent("update15.txt"), ctx), "the first edit is annotated");
+    await invokeEvent("turn_start", { type: "turn_start", turnIndex: 1, timestamp: 0 });
+    assert.equal(await invokeEvent("tool_result", editEvent("update15.txt"), ctx), undefined, "a turn boundary does not repeat the notice");
+    await startRun();
+    assert.ok(await invokeEvent("tool_result", editEvent("update15.txt"), ctx), "agent_start resets the notice");
+    await invokeEvent("session_compact", { type: "session_compact", trigger: "threshold" });
+    assert.ok(await invokeEvent("tool_result", editEvent("update15.txt"), ctx), "session_compact resets the notice");
+  });
+
+  await check("AC-NOTICE-16", "the update notice says memory was used earlier after a meta get in the same run", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "update16.txt"), "before");
+    await invoke({ action: "set", path: "update16.txt", tag: "summary", note: "body U16" });
+    const get = await invoke({ action: "get", path: "update16.txt", tag: "summary" });
+    await invokeEvent("tool_result", {
+      type: "tool_result",
+      toolCallId: "meta-1",
+      toolName: "meta",
+      input: { action: "get", path: "update16.txt", tag: "summary" },
+      content: get.content,
+      isError: false,
+      details: get.details,
+    }, ctx);
+    writeFileSync(join(workspaceRoot, "update16.txt"), "after");
+    const result = await invokeEvent("tool_result", editEvent("update16.txt"), ctx);
+    assert.ok(result, "the edit is annotated");
+    const text = result.content[result.content.length - 1].text;
+    assert.match(text, /earlier/i, "the block says memory was used earlier");
+    assert.match(text, /changed/i, "the block says the file changed");
+  });
+
   await check("REQ-MEAS-6", "session_start appends a session observation", async () => {
     const handler = handlers.get("session_start");
     assert.equal(typeof handler, "function", "a session_start handler is registered");
