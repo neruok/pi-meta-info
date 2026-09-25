@@ -2195,6 +2195,37 @@ await check("AC-44", "initialization tolerates an existing git-ignore and concur
   }
 });
 
+await check("AC-NOTICE-8", "probe reports recorded subjects and skips unrecorded ones", () => {
+  const ws = workspace("ac-probe-1", { "a.txt": "bytes", "b.txt": "bytes" });
+  assert.equal(ws.execute("set", { path: "a.txt", tag: "summary", note: "a note" }).error, null);
+  assert.deepEqual(ws.probe(["a.txt", "b.txt"]), [{ subject: "a.txt", tag: "summary", staleness: "FRESH" }]);
+});
+
+await check("AC-NOTICE-9", "probe reports STALE after the subject changes", () => {
+  const ws = workspace("ac-probe-2", { "a.txt": "one" });
+  assert.equal(ws.execute("set", { path: "a.txt", tag: "summary", note: "note" }).error, null);
+  writeFileSync(join(ws.root, "a.txt"), "two");
+  assert.equal(ws.probe(["a.txt"])[0].staleness, "STALE");
+});
+
+await check("AC-NOTICE-10", "probe writes no usage row and creates no store", () => {
+  const empty = workspace("ac-probe-3a", { "a.txt": "bytes" });
+  assert.deepEqual(empty.probe(["a.txt"]), []);
+  assert.equal(existsSync(indexPath(empty.root)), false, "probe creates no index");
+  const ws = workspace("ac-probe-3b", { "a.txt": "bytes" });
+  assert.equal(ws.execute("set", { path: "a.txt", tag: "summary", note: "note" }).error, null);
+  const before = usageRows(ws.root).length;
+  ws.probe(["a.txt"]);
+  assert.equal(usageRows(ws.root).length, before, "probe logs nothing");
+});
+
+await check("AC-NOTICE-11", "probe fails open on a corrupt store", () => {
+  const ws = workspace("ac-probe-4", { "a.txt": "bytes" });
+  mkdirSync(join(ws.root, ".pi", "meta"), { recursive: true });
+  writeFileSync(indexPath(ws.root), "not json");
+  assert.deepEqual(ws.probe(["a.txt"]), []);
+});
+
 const failed = results.filter((result) => !result.ok);
 for (const result of results) {
   const marker = result.ok ? "PASS" : "FAIL";

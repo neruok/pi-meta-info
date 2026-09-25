@@ -106,6 +106,124 @@ try {
     assert.equal(get.details.omitted_record_count, 0);
   });
 
+  // --- Read-time memory availability notice (AC-NOTICE-1..7) --------------
+  //
+  // Changed behavior: a successful `read` of an exact recorded subject has one
+  // bounded `<file-memory>` block appended to the unchanged result. The block
+  // carries tag names and staleness but no note body; retrieval still requires
+  // a deliberate `meta` call. Emission is once per subject per agent run.
+  const readEvent = (path, content = [{ type: "text", text: "file bytes" }], isError = false) => ({
+    type: "tool_result",
+    toolCallId: "read-1",
+    toolName: "read",
+    input: { path },
+    content,
+    isError,
+    details: undefined,
+  });
+  const invokeEvent = (name, ...args) => {
+    const handler = handlers.get(name);
+    return handler ? handler(...args) : undefined;
+  };
+  const startRun = () => invokeEvent("agent_start");
+  const usageRowCount = () => {
+    const path = join(workspaceRoot, ".pi", "meta", "usage.jsonl");
+    return existsSync(path) ? readFileSync(path, "utf8").split("\n").filter((line) => line !== "").length : 0;
+  };
+  const noticeText = (result) => result.content.map((part) => part.text ?? "").join("\n");
+
+  await check("AC-NOTICE-1", "the notice is appended and the original read content is an unchanged prefix", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice1.txt"), "original bytes");
+    await invoke({ action: "set", path: "notice1.txt", tag: "summary", note: "note body N1" });
+    const original = [{ type: "text", text: "original bytes" }];
+    const result = await invokeEvent("tool_result", readEvent("notice1.txt", original), ctx);
+    assert.ok(result, "the first read is annotated");
+    assert.equal(result.content.length, original.length + 1, "exactly one block is appended");
+    for (let i = 0; i < original.length; i += 1) assert.deepEqual(result.content[i], original[i], `original part ${i} is unchanged`);
+    const appended = result.content[result.content.length - 1];
+    assert.equal(appended.type, "text", "the appended part is text");
+    assert.match(appended.text, /^<file-memory>\n/, "the block opens the element");
+    assert.match(appended.text, /\n<\/file-memory>$/, "the block closes the element");
+    assert.equal(result.isError, undefined, "no error flag is set");
+    assert.equal(result.details, undefined, "no details are set");
+  });
+
+  await check("AC-NOTICE-2", "the notice lists tags and staleness, gives one concrete get for a single tag, and carries no body", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice2single.txt"), "single bytes");
+    await invoke({ action: "set", path: "notice2single.txt", tag: "summary", note: "single body N2" });
+    const singleText = noticeText(await invokeEvent("tool_result", readEvent("notice2single.txt"), ctx));
+    assert.match(singleText, /notice2single\.txt/, "the subject is named");
+    assert.match(singleText, /summary/, "the tag is listed");
+    assert.match(singleText, /\[FRESH\]/, "the staleness state is listed");
+    assert.match(singleText, /meta get/, "a get call is suggested");
+    assert.match(singleText, /tag: "summary"/, "the single tag is concrete");
+    assert.ok(!singleText.includes("single body N2"), "no note body is carried");
+    assert.ok(Buffer.byteLength(singleText, "utf8") <= 4096, "the block is bounded");
+
+    writeFileSync(join(workspaceRoot, "notice2multi.txt"), "multi bytes");
+    await invoke({ action: "set", path: "notice2multi.txt", tag: "summary", note: "multi summary N2" });
+    await invoke({ action: "set", path: "notice2multi.txt", tag: "intent", note: "multi intent N2" });
+    const multiText = noticeText(await invokeEvent("tool_result", readEvent("notice2multi.txt"), ctx));
+    assert.match(multiText, /summary/, "the first tag is listed");
+    assert.match(multiText, /intent/, "the second tag is listed");
+    assert.ok(!multiText.includes("multi summary N2") && !multiText.includes("multi intent N2"), "no note body is carried");
+  });
+
+  await check("AC-NOTICE-3", "sequential reads of one subject in a run emit the notice once, and turn_start does not clear it", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice3.txt"), "chunked bytes");
+    await invoke({ action: "set", path: "notice3.txt", tag: "summary", note: "chunked N3" });
+    const first = await invokeEvent("tool_result", readEvent("notice3.txt"), ctx);
+    assert.ok(first, "the first chunk is annotated");
+    await invokeEvent("turn_start", { type: "turn_start", turnIndex: 1, timestamp: 0 });
+    const second = await invokeEvent("tool_result", readEvent("notice3.txt"), ctx);
+    assert.equal(second, undefined, "a later chunk in the same run is not annotated again");
+  });
+
+  await check("AC-NOTICE-4", "agent_start clears the per-run set so a new run surfaces the notice again", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice4.txt"), "run bytes");
+    await invoke({ action: "set", path: "notice4.txt", tag: "summary", note: "run N4" });
+    const first = await invokeEvent("tool_result", readEvent("notice4.txt"), ctx);
+    assert.ok(first, "the first run is annotated");
+    await startRun();
+    const second = await invokeEvent("tool_result", readEvent("notice4.txt"), ctx);
+    assert.ok(second, "the next run is annotated again");
+  });
+
+  await check("AC-NOTICE-5", "session_compact clears the per-run set so compaction can resurface the notice", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice5.txt"), "compact bytes");
+    await invoke({ action: "set", path: "notice5.txt", tag: "summary", note: "compact N5" });
+    const first = await invokeEvent("tool_result", readEvent("notice5.txt"), ctx);
+    assert.ok(first, "the pre-compaction read is annotated");
+    await invokeEvent("session_compact", { type: "session_compact", trigger: "threshold" });
+    const second = await invokeEvent("tool_result", readEvent("notice5.txt"), ctx);
+    assert.ok(second, "the post-compaction read is annotated again");
+  });
+
+  await check("AC-NOTICE-6", "unrecorded, non-text, error, and outside reads pass through unchanged", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice6.txt"), "text bytes");
+    await invoke({ action: "set", path: "notice6.txt", tag: "summary", note: "text N6" });
+    assert.equal(await invokeEvent("tool_result", readEvent("unrecorded-n6.txt"), ctx), undefined, "no records means no notice");
+    const mixed = [{ type: "text", text: "mixed" }, { type: "image", data: "AAAA", mimeType: "image/png" }];
+    assert.equal(await invokeEvent("tool_result", readEvent("notice6.txt", mixed), ctx), undefined, "non-text results pass through");
+    assert.equal(await invokeEvent("tool_result", readEvent("notice6.txt", [{ type: "text", text: "err" }], true), ctx), undefined, "error results pass through");
+    assert.equal(await invokeEvent("tool_result", readEvent("../outside.txt"), ctx), undefined, "outside paths pass through");
+  });
+
+  await check("AC-NOTICE-7", "the notice appends no usage-log row", async () => {
+    await startRun();
+    writeFileSync(join(workspaceRoot, "notice7.txt"), "quiet bytes");
+    await invoke({ action: "set", path: "notice7.txt", tag: "summary", note: "quiet N7" });
+    const afterSet = usageRowCount();
+    await invokeEvent("tool_result", readEvent("notice7.txt"), ctx);
+    assert.equal(usageRowCount(), afterSet, "the notice logs nothing");
+  });
+
   await check("REQ-MEAS-6", "session_start appends a session observation", async () => {
     const handler = handlers.get("session_start");
     assert.equal(typeof handler, "function", "a session_start handler is registered");

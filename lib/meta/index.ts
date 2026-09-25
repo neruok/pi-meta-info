@@ -73,6 +73,13 @@ export interface UndeclaredTag {
   count: number;
 }
 
+/** One subject/tag observation from `MetaWorkspace.probe`, used by the read gate. */
+export interface ProbeEntry {
+  subject: string;
+  tag: string;
+  staleness: Staleness;
+}
+
 export type MetaErrorCode =
   | "INVALID_ARGS"
   | "PATH_OUTSIDE_WORKSPACE"
@@ -198,6 +205,8 @@ export const LIMITS: MetaLimits = {
   lock_timeout_ms: 5000,
   lock_poll_interval_ms: 50,
 };
+
+const PROBE_SUBJECT_LIMIT = 8;
 
 export const BUILT_IN_TAGS: Readonly<Record<string, string>> = {
   summary: "The file's role, observed behavior, and relationships to other files.",
@@ -1293,6 +1302,57 @@ export class MetaWorkspace {
     const result = this.dispatch(action, params);
     this.attemptLogging(result, params);
     return result;
+  }
+
+  /**
+   * Read-only, non-logging subject probe for the extension's first-read gate.
+   * Returns the tag and staleness for requested exact subjects that have
+   * records, so the extension can surface that memory exists without carrying
+   * any note body into context. It never writes the store and never appends a
+   * usage row. It fails open: an unreadable store, an unusable path, or a
+   * subject that cannot be contained is skipped rather than thrown.
+   */
+  probe(subjects: readonly string[], limit = PROBE_SUBJECT_LIMIT): ProbeEntry[] {
+    let records: MetaRecord[];
+    try {
+      records = loadIndex(this.root);
+    } catch {
+      return [];
+    }
+    const wanted = new Set<string>();
+    for (const value of subjects) {
+      try {
+        wanted.add(normalizeSubject(value));
+      } catch {
+        /* an unusable subject is skipped */
+      }
+    }
+    if (wanted.size === 0) return [];
+    const grouped = new Map<string, MetaRecord[]>();
+    for (const record of records) {
+      if (!wanted.has(record.subject)) continue;
+      const list = grouped.get(record.subject);
+      if (list) list.push(record);
+      else grouped.set(record.subject, [record]);
+    }
+    const bounded = Math.max(1, Math.min(limit, LIMITS.max_query_limit));
+    const entries: ProbeEntry[] = [];
+    for (const subject of [...grouped.keys()].sort().slice(0, bounded)) {
+      let observation: Observation;
+      try {
+        observation = observe(containSubject(this.root, subject), () => {}, this.options.onBeforeRead);
+      } catch {
+        continue;
+      }
+      for (const record of grouped.get(subject) ?? []) {
+        entries.push({
+          subject,
+          tag: record.tag,
+          staleness: classifyObservation(observation, record.content_hash).staleness,
+        });
+      }
+    }
+    return entries;
   }
 
   /** Attempt one usage-log append and surface a failure as a warning (REQ-MEAS-2). */
